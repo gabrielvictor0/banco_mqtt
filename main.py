@@ -4,61 +4,70 @@ from flask_sqlalchemy import SQLAlchemy
 import json
 import paho.mqtt.client as mqtt
 
+import google.generativeai as genai
+
+import smtplib 
+import email.message
+
+genai.configure(api_key="AIzaSyDoMqR5BvRd_ppu3tjjOvL9kTa1VyyXYgA")
 
 
-#CONEXÃO COM O BANCO DE DADOS 
+# CONEXÃO COM O BANCO DE DADOS
+
+app = Flask('registro')
+# A conexão com banco haverá modificações na base de dados
+app.config['SQLALCHEMY_TACK_MODIFICATIONS'] = False
+# Configura a URI de conexão com o banco de dados MYSQL.
+app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql://root:senai%40134@127.0.0.1/bd_medidor'
+# Cria uma instância do SQLAlchemy, passando a aplicação Flask como parâmetro.
+mybd = SQLAlchemy(app)
 
 
-app = Flask("registro") #Nome da Aplicação
-
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False # Configura o SQLAlchemy para rastrear modificações 
-
-app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql://root:senai%40134@127.0.0.1/db_medidor'
-
-
-
-mybd = SQLAlchemy(app) # Cria uma instância do SQLAlchemy, passando a Flask como parâmetro
+# CONEXÃO COM OS SENSORES
 
 mqtt_dados = {}
 
-def conexao_sensor(client, userdata,flags,rc):
-    client.subscribe("projeto_integrado/SENAI134/Cienciadedados/GrupoX")   
+def conexao_sensor(cliente, userdata, flags, rc):
+    cliente.subscribe('projeto_integrado/SENAI134/Cienciadedados/GrupoX')
 
 
 def msg_sensor(client, userdata, msg):
     global mqtt_dados
+    # Decodificar a mensagem recebida de bytes para string
+    valor = msg.payload.decode('utf-8')
+    # Decodificar de string para JSON
+    mqtt_dados = json.loads(valor)
 
-    valor = msg.payload.decode('utf-8') # Decodificar a mensagem recebida de bytes para string 
-
-    mqtt_dados = json.loads(valor) #Decodificar de string para JSON
-
-    print(f"Mensagem recebida: {mqtt_dados}")
+    print(f'Mensagem Recebida: {mqtt_dados}')
 
 
+    # Correlação Banco de Dados com Sensores
     with app.app_context():
         try:
-          temperatura = mqtt_dados.get('temperature')
-          pressao = mqtt_dados.get('pressure')
-          altitude = mqtt_dados.get('altitude')
-          umidade = mqtt_dados.get('humidity')
-          co2 = mqtt_dados.get('co2')
-          poeira = 0
-          tempo_registro = mqtt_dados.get('timestamp')
-
-          if tempo_registro is None:
-              print("Timestamp não encontrado")
-              return
-          try:
-              tempo_oficial = datetime.fromtimestamp(int(tempo_registro), tz=timezone.utc)
+            temperatura = mqtt_dados.get('temperature')
+            pressao = mqtt_dados.get('pressure')
+            altitude = mqtt_dados.get('altitude')
+            umidade = mqtt_dados.get('humidity')
+            co2 = mqtt_dados.get('co2')
+            poeira  = 0
+            tempo_registro = mqtt_dados.get('timestamp')
+        
+            if tempo_registro is None:
+                print('Timestamp não encontrado')
+                return
             
-          except (ValueError, TypeError) as e:
-              print(f"Erro ao converter timestamp: {str(e)}")
-              return
-          
+            try:
+                tempo_oficial = datetime.fromtimestamp(int
+                (tempo_registro), tz=timezone.utc)
 
+
+            except Exception as ex:
+                print(f'Erro ao converter timestamp: {str(ex)}')
+                return
             
+            #Criar o objeto que vai simular a tabela do banco
 
-          novos_dados = Registro(  
+            novos_dados = Registro(
                 temperatura = temperatura,
                 pressao = pressao,
                 altitude = altitude,
@@ -67,28 +76,30 @@ def msg_sensor(client, userdata, msg):
                 poeira = poeira,
                 tempo_registro = tempo_oficial
             )
-          
 
-            #Adicionar novo registro ao banco 
+            # Adicionar novo registro ao banco
+            mybd.session.add(novos_dados)
+            mybd.session.commit()
+            print('Dados foram inseridos com sucesso no banco de dados!')
+            
+            model = genai.GenerativeModel('gemini-1.5-flash')
+            response = model.generate_content("Faça um aviso sobre a temperetura atual para que a população possa se proteger de altas temperaturas. Resuma isto em 3 linhas")
 
-          mybd.session.add(novos_dados)
-          mybd.session.commit()
-          print("Dados foram inseridos com sucesso no banco de dados!")
+            enviar_email(response.text)
+        
 
         except Exception as e:
-            print(f"Erro ao processar os dados do MQTT{str(e)}")
+            print(f'Erro ao processar os dados do MQTT {str(e)}')
             mybd.session.rollback()
-
 
 
 mqtt_client = mqtt.Client()
 mqtt_client.on_connect = conexao_sensor
 mqtt_client.on_message = msg_sensor
-mqtt_client.connect("test.mosquitto.org", 1883, 60)
+mqtt_client.connect('test.mosquitto.org', 1883, 60)
 
 def start_mqtt():
     mqtt_client.loop_start()
-
 
 class Registro(mybd.Model):
     __tablename__ = 'tb_registro'
@@ -100,104 +111,92 @@ class Registro(mybd.Model):
     co2 = mybd.Column(mybd.Numeric(10, 2))
     poeira = mybd.Column(mybd.Numeric(10, 2))
     tempo_registro = mybd.Column(mybd.DateTime)
+    
+def enviar_email(txt):
+    corpo_email =  f""" {txt}"""
+    msg = email.message.Message()
+    msg['Subject'] = "Assunto"
+    msg['From'] = 'otaldoclaitonrasta@gmail.com'
+    msg['To'] = 'gabrielbiscola21@gmail.com'
+    password = 'huvo uppg gyac qfyn'
+    msg.add_header('Contect-Type', 'text/html')
+    msg.set_payload(corpo_email)
+    
+    s = smtplib.SMTP('smtp.gmail.com:587')
+    s.starttls()
+    s.login(msg['From'],password)
+    s.sendmail(msg['From'],[msg['To']], msg.as_string().encode('utf-8'))
 
+@app.route("/registro", methods=["GET"])
+def seleciona_registro():
+    registro_objetos = Registro.query.all()
+    registro_json = [registro.to_json() for registro in registro_objetos]
 
-#####      GET     #####
-@app.route('/registro', methods=['GET'])
-def selecionaRegistro():
-    registro_objeto = Registro.query.all()
-    registro_json = [dado.to_json() for dado in registro_objeto]
-    return gera_resposta(200, 'registro', registro_json)
+    return generate_response(200, "registro", registro_json)
 
+@app.route("/registro/<id>", methods=["GET"])
+def seleciona_registro_id(id):
+    registro_objetos = Registro.query.filter_by(id=id).first()
 
-def gera_resposta(status, nome_conteudo, conteudo, mensagem=False):
-    body = {}
-    body[nome_conteudo] = conteudo
+    if registro_objetos:
+        registro_json = registro_objetos.to_josn()
 
-    if mensagem:
-        body['mensagem'] = mensagem
-        return Response(json.Dumps(body), status=status, mimetype='application/json')
-
-
-#####      GET POR ID     #####
-@app.route('/registro/<id>', methods=['GET'])
-def selecionaRegistroID(id):
-    registro_objeto = Registro.query.filter_by(id=id).first()
-    if registro_objeto:
-        registro_json = [dado.to_json() for dado in registro_objeto]
-        return gera_resposta(200, 'registro', registro_json)
+        return generate_response(200, "registro", registro_json)
+    
     else:
-        return gera_resposta(404, 'registro', {}, 'Registro não encontrado')
+        return generate_response(404, "registro", (), "Registro nao encontrado")
+    
+@app.route("/registro/<id>", methods=["GET"])
+def delete_registro(id):
+    registro = Registro.query.filter_by(id=id).first()
 
-
-
-#####       DELETE      ######
-@app.route('/registro/<id>',methods=['DELETE'])
-def deletaRegistro(id):
-    registro_objeto = Registro.query.filter_by(id=id).first()
-    if registro_objeto:
+    if registro:
         try:
-            mybd.session.delete(registro_objeto)
+            mybd.session.delete(registro)
             mybd.session.commit()
 
-            return gera_resposta(200, 'registro', registro_objeto, 'Excluido com sucesso!')
+            return generate_response(200, "registro", registro.to_json(), "Registro deletado com sucesso")
         except Exception as e:
-            print('Erro', e)
+            print("Erro", e)
             mybd.session.rollback()
-            return gera_resposta(404, 'registro', {}, 'Erro ao excluir o registro.')
+
+            return generate_response(404, "registro", (), "Erro ao deletar")
     else:
-        return gera_resposta(404, 'registro', {}, 'Registro não encontrado.')
-
-
-
-
-
-##### GET SENSORES ####
-@app.route('/dados', methods=['GET'])
-def buscaDados():
+        return generate_response(404, "registro", (), "Registro nao encontrado")
+    
+# --------------------------------------- SENSOR ------------------------------------------------------------
+@app.route("/dados", methods=["GET"])
+def get_data(id):
+    registro = Registro.query.filter_by(id=id).first()
+    
     return jsonify(mqtt_dados)
 
-def to_json(self):
-    return {
-        'id': self.id,
-        'temperatura': float(self.temperatura),
-        'pressao': float(self.pressao),
-        'altitude': float(self.altitude),
-        'umitade': float(self.umitade),
-        'co2': float(self.co2),
-        'poeira': float(self.poeira),
-        'tempo_registro': self.tempo_registro.strftime('%Y-%m-%d %H:%M:%S')
-        if self.tempo_registro else None
-    }
 
-
-
-@app.route('/dados', methods=['POST'])
-def criar_dados():
+@app.route("/dados", methods=["POST"])
+def create_data():
     try:
-        dados = request.get_json()
+        data = request.get_json()
 
-        if not dados:
-            return jsonify({'error': 'Nenhum dado fornecido'}), 400
+        if not data:
+            return generate_response(400, "data", (), "Nenhum dado fornecido")
 
-        print(f'Dados recebidos: {dados}')
-        temperatura = dados.get('temperatura')
-        pressao = dados.get('pressao')
-        altitude = dados.get('altitude')
-        umidade = dados.get('umidade')
-        co2 = dados.get('co2')
-        poeira = dados.get('poeira')
-        timestamp_unix = dados.get('tempo_registro')
 
-        # Convertendo timestamp
+        print(f"Dados recebidos: {data}")
+        temperatura = data.get("temperatura")
+        pressao = data.get("pressao")
+        altitude = data.get("altitude")
+        umidade = data.get("umidade")
+        co2 = data.get("co2")
+        poeira = data.get("poeira")
+        timestamp_unix = data.get("tempo_registro")
+
         try:
             tempo_oficial = datetime.fromtimestamp(int(timestamp_unix), tz=timezone.utc)
         except Exception as e:
-            print('Erro: ', e)
-            return gera_resposta(400, 'registro', {}, 'Timestamp Inválido')
-        
-        # Cria o objeto de Registro
-        novoRegistro = Registro(
+            print("Erro", e)
+            return generate_response(400, "error", (), "Timestamp invalido")
+
+        novo_registro = Registro(
             temperatura=temperatura,
             pressao=pressao,
             altitude=altitude,
@@ -205,23 +204,49 @@ def criar_dados():
             co2=co2,
             poeira=poeira,
             tempo_registro=tempo_oficial
-        )
-
-        mybd.session.add(novoRegistro)
-        print('Adicionando novo registro')
-
+        )    
+            
+        mybd.session.add(novo_registro)
+        print("Adicionando um novo registro")
+        
         mybd.session.commit()
-        print('Dados inseridos no banco de dados com sucesso!')
-        return gera_resposta(201, 'registro', {}, 'Dados inseridos com sucesso')
+        print("Dados inseridos no banco de dados com sucesso")
+        
+        
+        return generate_response(201, "data", novo_registro, "Dados recebidos com sucesso")
     
     except Exception as e:
-        print('Erro ao processar a solicitação: ', e)
-        mybd.session.rollback
-        return(500, 'registro', {}, 'Falha ao processar os dados')
+        print("Erro", e)
+        mybd.session.rollback()
+
+        return generate_response(500, "data", (), "Falha ao processar os dados")
+
+# --------------------------------------- FUNCTIONS ------------------------------------------------------------
+def to_json_sensor(self):
+    return {
+        "id": self.id,
+        "temperatura": float(self.temperatura),
+        "pressao": float(self.pressao),
+        "altitude": float(self.altitude),
+        "umidade": float(self.umidade),
+        "co2": float(self.co2),
+        "poeira": float(self.poeira),
+        "tempo_registro": self.tempo_registro.strftime('%Y-%m-%d %H:%M:%S') if self.tempo_registro else None
+    }
+
+def generate_response(status, keyContent, content, msg=False):
+    body={}
+    body[keyContent] = content
+
+    if msg:
+        body["mensagem"] = msg
+
+    return Response(json.dumps(body), status=status, mimeType="application/json")
+
 
 if __name__ == '__main__':
     with app.app_context():
         mybd.create_all()
 
         start_mqtt()
-        app.run(port=5000, host='localhost', debug=True)
+        app.run(port=5000, host="localhost", debug=True)
